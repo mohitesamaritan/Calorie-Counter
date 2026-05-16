@@ -12,19 +12,22 @@ from typing import Optional
 from supabase import create_client, Client
 
 # ==========================================
-# 1. SETUP & CLOUD CONFIGURATION
+# 1. SETUP & CLOUD CONFIGURATION (SECURED)
 # ==========================================
-genai.configure(api_key="AIzaSyD0FJXNr3JwardPp3pRJhQY_2SVZdiPvaw") 
+# We pull these securely from the cloud's environment vault!
+GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
+SUPA_URL = os.environ.get("SUPABASE_URL")
+SUPA_KEY = os.environ.get("SUPABASE_KEY")
 
-SUPABASE_URL = "https://dnfgurbtamrcqyxuzdxv.supabase.co"     
-SUPABASE_KEY = "sb_publishable_wsKvQ91uxeT-HXGBsa-icw_QI98bliJ"         
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+genai.configure(api_key=GEMINI_KEY) 
+supabase: Client = create_client(SUPA_URL, SUPA_KEY)
 
 model = genai.GenerativeModel('gemini-2.5-flash')
 
 app = FastAPI(title="Calorie Counter - Secure Cloud Backend")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
+# ... (The rest of your code stays exactly the same from here down) ...
 # ==========================================
 # 2. DATA MODELS & DYNAMIC MATH
 # ==========================================
