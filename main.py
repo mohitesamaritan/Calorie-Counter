@@ -22,17 +22,20 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 model = genai.GenerativeModel('gemini-2.5-flash')
 
-app = FastAPI(title="Indian Cal AI - Multi-User Cloud Backend")
+app = FastAPI(title="Calorie Counter - Secure Cloud Backend")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 # ==========================================
 # 2. DATA MODELS & DYNAMIC MATH
 # ==========================================
+# FIXED: Login now requires Email and Password
 class AuthRequest(BaseModel):
-    name: str
+    email: str
+    password: str
 
+# FIXED: Profile creation now requires a Password
 class UserProfile(BaseModel):
-    name: str; email: str; phone: str; age: int; gender: str; height_cm: float; weight_kg: float; activity_level: str; deficit_tier: str; diet_preference: str
+    name: str; email: str; phone: str; password: str; age: int; gender: str; height_cm: float; weight_kg: float; activity_level: str; deficit_tier: str; diet_preference: str
 
 class MealLog(BaseModel):
     user_id: int; dish_name: str; calories: int; protein: int; carbs: int; fat: int; portion: float
@@ -59,38 +62,46 @@ def calculate_macros(profile: UserProfile):
     }
 
 # ==========================================
-# 3. API ENDPOINTS
+# 3. API ENDPOINTS (SECURED)
 # ==========================================
 
 @app.post("/auth")
 def authenticate(req: AuthRequest):
-    # FIXED: Uses .ilike() for case-insensitive login!
-    res = supabase.table("users").select("*").ilike("name", req.name.strip()).execute()
-    if res.data:
-        user = res.data[0]
+    try:
+        # SECURE: Validates password cryptographically against Supabase Auth
+        supabase.auth.sign_in_with_password({"email": req.email.strip(), "password": req.password})
         
-        weight = user.get("weight_kg", 70)
-        activity = user.get("activity_level", "sedentary")
-        base_water = int(weight * 35)
-        if activity == 'moderate': base_water += 500
-        elif activity == 'active': base_water += 1000
-        step_goals = {"sedentary": 5000, "light": 7500, "moderate": 10000, "active": 12000}
+        # If password is correct, grab their data
+        res = supabase.table("users").select("*").eq("email", req.email.strip()).execute()
+        if res.data:
+            user = res.data[0]
+            weight = user.get("weight_kg", 70)
+            activity = user.get("activity_level", "sedentary")
+            base_water = int(weight * 35)
+            if activity == 'moderate': base_water += 500
+            elif activity == 'active': base_water += 1000
+            step_goals = {"sedentary": 5000, "light": 7500, "moderate": 10000, "active": 12000}
 
-        macros = {
-            "tdee": user["tdee"], "target_calories": user["target_calories"],
-            "target_protein": user["target_protein"], "target_carbs": user["target_carbs"],
-            "target_fat": user["target_fat"], "diet_preference": user["diet_preference"],
-            "target_water_ml": base_water, "target_steps": step_goals.get(activity, 10000)
-        }
-        return {"status": "returning_user", "user_id": user["id"], "goals": macros}
-    
-    return {"status": "new_user"}
+            macros = {
+                "tdee": user["tdee"], "target_calories": user["target_calories"],
+                "target_protein": user["target_protein"], "target_carbs": user["target_carbs"],
+                "target_fat": user["target_fat"], "diet_preference": user["diet_preference"],
+                "target_water_ml": base_water, "target_steps": step_goals.get(activity, 10000)
+            }
+            return {"status": "success", "user_id": user["id"], "goals": macros}
+    except Exception as e:
+        raise HTTPException(status_code=401, detail="Invalid Email or Password.")
 
 @app.post("/profile")
 def create_profile(profile: UserProfile):
+    try:
+        # SECURE: Registers the user cryptographically in Supabase Auth
+        supabase.auth.sign_up({"email": profile.email.strip(), "password": profile.password})
+    except Exception as e:
+        raise HTTPException(status_code=400, detail="Email already registered or invalid.")
+
     macros = calculate_macros(profile)
     
-    # FIXED: Pushes Email and Phone to Supabase
     user_data = {
         "name": profile.name.strip(), "email": profile.email.strip(), "phone": profile.phone.strip(),
         "age": profile.age, "gender": profile.gender, 
@@ -204,7 +215,7 @@ def get_history(user_id: int):
 def scan_barcode(barcode: str):
     try:
         url = f"https://world.openfoodfacts.org/api/v2/product/{barcode}.json"
-        response = requests.get(url, headers={"User-Agent": "IndianCalAI/1.0"})
+        response = requests.get(url, headers={"User-Agent": "CalorieCounter/1.0"})
         data = response.json()
 
         if data.get("status") == 1:
