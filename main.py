@@ -14,31 +14,26 @@ from supabase import create_client, Client
 # ==========================================
 # 1. SETUP & CLOUD CONFIGURATION (SECURED)
 # ==========================================
-# We pull these securely from the cloud's environment vault!
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
 SUPA_URL = os.environ.get("SUPABASE_URL")
 SUPA_KEY = os.environ.get("SUPABASE_KEY")
 
 genai.configure(api_key=GEMINI_KEY) 
 supabase: Client = create_client(SUPA_URL, SUPA_KEY)
-
 model = genai.GenerativeModel('gemini-2.5-flash')
 
 app = FastAPI(title="Calorie Counter - Secure Cloud Backend")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
-# ... (The rest of your code stays exactly the same from here down) ...
 # ==========================================
 # 2. DATA MODELS & DYNAMIC MATH
 # ==========================================
-# FIXED: Login now requires Email and Password
 class AuthRequest(BaseModel):
     email: str
     password: str
 
-# FIXED: Profile creation now requires a Password
 class UserProfile(BaseModel):
-    name: str; email: str; phone: str; password: str; age: int; gender: str; height_cm: float; weight_kg: float; activity_level: str; deficit_tier: str; diet_preference: str
+    first_name: str; last_name: str; email: str; phone: str; password: str; age: int; gender: str; height_cm: float; weight_kg: float; activity_level: str; deficit_tier: str; diet_preference: str; alcohol_consumption: str
 
 class MealLog(BaseModel):
     user_id: int; dish_name: str; calories: int; protein: int; carbs: int; fat: int; portion: float
@@ -71,10 +66,7 @@ def calculate_macros(profile: UserProfile):
 @app.post("/auth")
 def authenticate(req: AuthRequest):
     try:
-        # SECURE: Validates password cryptographically against Supabase Auth
         supabase.auth.sign_in_with_password({"email": req.email.strip(), "password": req.password})
-        
-        # If password is correct, grab their data
         res = supabase.table("users").select("*").eq("email", req.email.strip()).execute()
         if res.data:
             user = res.data[0]
@@ -98,7 +90,6 @@ def authenticate(req: AuthRequest):
 @app.post("/profile")
 def create_profile(profile: UserProfile):
     try:
-        # SECURE: Registers the user cryptographically in Supabase Auth
         supabase.auth.sign_up({"email": profile.email.strip(), "password": profile.password})
     except Exception as e:
         raise HTTPException(status_code=400, detail="Email already registered or invalid.")
@@ -106,45 +97,43 @@ def create_profile(profile: UserProfile):
     macros = calculate_macros(profile)
     
     user_data = {
-        "name": profile.name.strip(), "email": profile.email.strip(), "phone": profile.phone.strip(),
+        "first_name": profile.first_name.strip(), "last_name": profile.last_name.strip(), 
+        "email": profile.email.strip(), "phone": profile.phone.strip(),
         "age": profile.age, "gender": profile.gender, 
         "height_cm": profile.height_cm, "weight_kg": profile.weight_kg, 
         "activity_level": profile.activity_level, "deficit_tier": profile.deficit_tier, 
-        "diet_preference": profile.diet_preference, "tdee": macros['tdee'], 
-        "target_calories": macros['target_calories'], "target_protein": macros['target_protein'], 
-        "target_carbs": macros['target_carbs'], "target_fat": macros['target_fat']
+        "diet_preference": profile.diet_preference, "alcohol_consumption": profile.alcohol_consumption,
+        "tdee": macros['tdee'], "target_calories": macros['target_calories'], 
+        "target_protein": macros['target_protein'], "target_carbs": macros['target_carbs'], "target_fat": macros['target_fat']
     }
     res = supabase.table("users").insert(user_data).execute()
     new_user_id = res.data[0]['id']
     
     return {"message": "Cloud Profile created", "user_id": new_user_id, "calculated_goals": macros}
 
-@@app.post("/analyze")
-async def analyze_food(file: Optional[UploadFile] = File(None), manual_dish: Optional[str] = Form(None), diet_preference: str = Form("Any")):
+@app.post("/analyze")
+async def analyze_food(file: Optional[UploadFile] = File(None), manual_dish: Optional[str] = Form(None), diet_preference: str = Form("Any"), alcohol: str = Form("None")):
     try:
-        diet_rules = f"\nCRITICAL: The user's diet is '{diet_preference}'. Swap suggestions MUST adhere strictly to a {diet_preference} diet."
+        # ADVANCED ALCOHOL LOGIC
+        diet_rules = f"\nCRITICAL: User diet is '{diet_preference}'. If the image or text is an alcoholic beverage (bottle, can, poured drink), you MUST set 'health_badge' to 'Alcohol'. You MUST identify the specific type (e.g., 'Scotch Whisky', 'Wheat Beer'). You MUST calculate calories and macros for exactly ONE STANDARD SERVING (e.g., 1 Peg/30ml for spirits, 1 Pint/330ml for beer). Set the dish_name to '[Brand/Type] (1 Peg/Beer)' so the user can multiply it."
         
-        # We explicitly tell it the data types so it doesn't hallucinate weird text
-        base_prompt = f"Return a JSON array of up to 4 most likely dish options. Each object must contain exactly these keys: dish_name (string), health_score (integer), health_badge (string), estimated_calories (integer), protein_grams (integer), carbs_grams (integer), fat_grams (integer), healthier_swap_name (string). {diet_rules}"
+        base_prompt = f"Return a JSON array of up to 4 most likely dish/drink options. Each object must contain exactly these keys: dish_name (string), health_score (integer), health_badge (string), estimated_calories (integer), protein_grams (integer), carbs_grams (integer), fat_grams (integer), healthier_swap_name (string). {diet_rules}"
 
-        # THE FIX: Force Gemini into Strict JSON Machine Mode
         strict_config = genai.GenerationConfig(response_mime_type="application/json")
 
         if not file and manual_dish: 
-            response = model.generate_content(f"User ate: '{manual_dish}'. {base_prompt}", generation_config=strict_config)
+            response = model.generate_content(f"User ate/drank: '{manual_dish}'. {base_prompt}", generation_config=strict_config)
         elif file and manual_dish: 
-            response = model.generate_content([f"User says this is '{manual_dish}'. Use image for portion/oil. {base_prompt}", Image.open(io.BytesIO(await file.read()))], generation_config=strict_config)
+            response = model.generate_content([f"User says this is '{manual_dish}'. Use image for portion. {base_prompt}", Image.open(io.BytesIO(await file.read()))], generation_config=strict_config)
         elif file and not manual_dish: 
-            response = model.generate_content([f"Identify this food. {base_prompt}", Image.open(io.BytesIO(await file.read()))], generation_config=strict_config)
+            response = model.generate_content([f"Identify this food or drink. {base_prompt}", Image.open(io.BytesIO(await file.read()))], generation_config=strict_config)
         else: 
             raise HTTPException(status_code=400, detail="Must provide image or text.")
         
         try:
-            # We no longer need to manually scrub the text; it is guaranteed to be pure JSON
             return json.loads(response.text)
         except Exception as parse_error:
-            # If it still somehow fails, we send the raw text back so we can see what the AI did
-            raise HTTPException(status_code=500, detail=f"AI Format Error: {parse_error}. Raw Output: {response.text}")
+            raise HTTPException(status_code=500, detail=f"AI Format Error: {parse_error}. Raw: {response.text}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -165,14 +154,12 @@ def close_day(user_id: int):
     
     meals_res = supabase.table("meals").select("*").eq("user_id", user_id).gte("created_at", "today").execute()
     meals = meals_res.data
+    if not meals: raise HTTPException(status_code=400, detail="No meals logged today!")
 
-    if not meals:
-        raise HTTPException(status_code=400, detail="No meals logged today!")
-
-    filepath = os.path.join(os.getcwd(), f"dietitian_report_{user['name']}.csv")
+    filepath = os.path.join(os.getcwd(), f"dietitian_report_{user['first_name']}.csv")
     with open(filepath, 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
-        writer.writerow(["Daily Dietitian Report", f"Client: {user['name']}", f"Diet: {user['diet_preference']}"])
+        writer.writerow(["Daily Dietitian Report", f"Client: {user['first_name']} {user['last_name']}", f"Diet: {user['diet_preference']}"])
         writer.writerow(["Target Calories:", user['target_calories'], "TDEE (Maintenance):", user['tdee']])
         writer.writerow([])
         writer.writerow(["Dish Name", "Portions", "Calories", "Protein (g)", "Carbs (g)", "Fat (g)", "Time Logged"])
@@ -187,13 +174,7 @@ def close_day(user_id: int):
         writer.writerow(["TOTAL CONSUMED", "-", tot_cal, tot_pro, tot_carb, tot_fat, "-"])
         writer.writerow(["TARGET MACROS", "-", user['target_calories'], user['target_protein'], user['target_carbs'], user['target_fat'], "-"])
 
-    prompt = f"""
-    You are an expert fitness coach. The user just closed their day.
-    User Profile: TDEE is {user['tdee']} kcal. Goal is {user['target_calories']} kcal.
-    Actual today: {tot_cal} kcal, {tot_pro}g protein, {tot_carb}g carbs, {tot_fat}g fat.
-    Provide: 1. Encouraging Summary. 2. Clinical Breakdown. 3. Action Plan (Specific activity needed tomorrow if they went over {user['tdee']} kcal). Format as plain text.
-    """
-    
+    prompt = f"You are an expert fitness coach. User just closed day. TDEE is {user['tdee']} kcal. Goal is {user['target_calories']} kcal. Actual today: {tot_cal} kcal. Provide: 1. Encouraging Summary. 2. Clinical Breakdown. 3. Action Plan."
     response = model.generate_content(prompt)
     return {"report": response.text, "file_path": filepath}
 
@@ -204,24 +185,14 @@ def get_history(user_id: int):
     target = user_res.data[0]['target_calories']
     
     meals_res = supabase.table("meals").select("created_at, calories").eq("user_id", user_id).execute()
-    
     daily_totals = {}
     for meal in meals_res.data:
         date_only = meal['created_at'].split('T')[0]
-        if date_only not in daily_totals:
-            daily_totals[date_only] = 0
+        if date_only not in daily_totals: daily_totals[date_only] = 0
         daily_totals[date_only] += meal['calories']
         
     sorted_dates = sorted(daily_totals.keys())[-7:]
-    
-    chart_data = []
-    for d in sorted_dates:
-        chart_data.append({
-            "date": d[5:], 
-            "calories": daily_totals[d],
-            "target": target
-        })
-        
+    chart_data = [{"date": d[5:], "calories": daily_totals[d], "target": target} for d in sorted_dates]
     return {"chart_data": chart_data}
 
 @app.get("/scan_barcode/{barcode}")
@@ -252,6 +223,6 @@ def scan_barcode(barcode: str):
                 "healthier_swap_name": "N/A"
             }]
         else:
-            raise HTTPException(status_code=404, detail="Barcode not found in OpenFoodFacts database.")
+            raise HTTPException(status_code=404, detail="Barcode not found.")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
