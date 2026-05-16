@@ -119,22 +119,32 @@ def create_profile(profile: UserProfile):
     
     return {"message": "Cloud Profile created", "user_id": new_user_id, "calculated_goals": macros}
 
-@app.post("/analyze")
+@@app.post("/analyze")
 async def analyze_food(file: Optional[UploadFile] = File(None), manual_dish: Optional[str] = Form(None), diet_preference: str = Form("Any")):
     try:
         diet_rules = f"\nCRITICAL: The user's diet is '{diet_preference}'. Swap suggestions MUST adhere strictly to a {diet_preference} diet."
-        base_prompt = f"Return a JSON array of up to 4 most likely dish options. Each object must contain: dish_name, health_score, health_badge, estimated_calories, protein_grams, carbs_grams, fat_grams, healthier_swap_name. {diet_rules} Return ONLY raw JSON."
+        
+        # We explicitly tell it the data types so it doesn't hallucinate weird text
+        base_prompt = f"Return a JSON array of up to 4 most likely dish options. Each object must contain exactly these keys: dish_name (string), health_score (integer), health_badge (string), estimated_calories (integer), protein_grams (integer), carbs_grams (integer), fat_grams (integer), healthier_swap_name (string). {diet_rules}"
 
-        if not file and manual_dish: response = model.generate_content(f"User ate: '{manual_dish}'. {base_prompt}")
-        elif file and manual_dish: response = model.generate_content([f"User says this is '{manual_dish}'. Use image for portion/oil. {base_prompt}", Image.open(io.BytesIO(await file.read()))])
-        elif file and not manual_dish: response = model.generate_content([f"Identify this Indian food. {base_prompt}", Image.open(io.BytesIO(await file.read()))])
-        else: raise HTTPException(status_code=400, detail="Must provide image or text.")
+        # THE FIX: Force Gemini into Strict JSON Machine Mode
+        strict_config = genai.GenerationConfig(response_mime_type="application/json")
+
+        if not file and manual_dish: 
+            response = model.generate_content(f"User ate: '{manual_dish}'. {base_prompt}", generation_config=strict_config)
+        elif file and manual_dish: 
+            response = model.generate_content([f"User says this is '{manual_dish}'. Use image for portion/oil. {base_prompt}", Image.open(io.BytesIO(await file.read()))], generation_config=strict_config)
+        elif file and not manual_dish: 
+            response = model.generate_content([f"Identify this food. {base_prompt}", Image.open(io.BytesIO(await file.read()))], generation_config=strict_config)
+        else: 
+            raise HTTPException(status_code=400, detail="Must provide image or text.")
         
         try:
-            clean_text = response.text.replace("```json", "").replace("```", "").strip()
-            return json.loads(clean_text)
+            # We no longer need to manually scrub the text; it is guaranteed to be pure JSON
+            return json.loads(response.text)
         except Exception as parse_error:
-            raise HTTPException(status_code=500, detail=f"AI Format Error: {parse_error}")
+            # If it still somehow fails, we send the raw text back so we can see what the AI did
+            raise HTTPException(status_code=500, detail=f"AI Format Error: {parse_error}. Raw Output: {response.text}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
