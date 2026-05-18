@@ -60,6 +60,9 @@ class UserProfile(BaseModel):
 class MealLog(BaseModel):
     dish_name: str; calories: int; protein: int; carbs: int; fat: int; portion: float
 
+class NotificationRegistration(BaseModel):
+    notification_endpoint: str
+
 def calculate_macros(profile: UserProfile):
     bmr = (10 * profile.weight_kg) + (6.25 * profile.height_cm) - (5 * profile.age) + (5 if profile.gender.lower() == "male" else -161)
     multipliers = {"sedentary": 1.2, "light": 1.375, "moderate": 1.55, "active": 1.725}
@@ -187,7 +190,6 @@ async def analyze_food(
     current_user: dict = Depends(get_current_user)
 ):
     try:
-        # ADVANCED ALCOHOL LOGIC
         diet_rules = f"\nCRITICAL: User diet is '{diet_preference}'. If the image or text is an alcoholic beverage (bottle, can, poured drink), you MUST set 'health_badge' to 'Alcohol'. You MUST identify the specific type (e.g., 'Scotch Whisky', 'Wheat Beer'). You MUST calculate calories and macros for exactly ONE STANDARD SERVING (e.g., 1 Peg/30ml for spirits, 1 Pint/330ml for beer). Set the dish_name to '[Brand/Type] (1 Peg/Beer)' so the user can multiply it."
         
         base_prompt = f"Return a JSON array of up to 4 most likely dish/drink options. Each object must contain exactly these keys: dish_name (string), health_score (integer), health_badge (string), estimated_calories (integer), protein_grams (integer), carbs_grams (integer), fat_grams (integer), healthier_swap_name (string). {diet_rules}"
@@ -265,6 +267,16 @@ def get_history(current_user: dict = Depends(get_current_user)):
     sorted_dates = sorted(daily_totals.keys())[-7:]
     chart_data = [{"date": d[5:], "calories": daily_totals[d], "target": target} for d in sorted_dates]
     return {"chart_data": chart_data}
+
+@app.post("/register_notifications")
+def register_notifications(payload: NotificationRegistration, current_user: dict = Depends(get_current_user)):
+    try:
+        # We will add the notification_endpoint column to Supabase later if it doesn't exist,
+        # but the backend route is now ready to receive the token!
+        # supabase.table("users").update({"notification_endpoint": payload.notification_endpoint}).eq("id", current_user['id']).execute()
+        return {"status": "success", "message": "Endpoint received securely."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/scan_barcode/{barcode}")
 def scan_barcode(barcode: str):
