@@ -1,5 +1,6 @@
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 import google.generativeai as genai
 from PIL import Image
@@ -25,6 +26,24 @@ model = genai.GenerativeModel('gemini-2.5-flash')
 app = FastAPI(title="Calorie Counter - Secure Cloud Backend")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
+security = HTTPBearer()
+
+def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    token = credentials.credentials
+    try:
+        user_res = supabase.auth.get_user(token)
+        if not user_res or not user_res.user:
+            raise HTTPException(status_code=401, detail="Invalid token")
+            
+        email = user_res.user.email
+        res = supabase.table("users").select("*").eq("email", email).execute()
+        if not res.data:
+            raise HTTPException(status_code=404, detail="User profile not found")
+            
+        return res.data[0]
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=f"Authentication failed: {str(e)}")
+
 # ==========================================
 # 2. DATA MODELS & DYNAMIC MATH
 # ==========================================
@@ -32,11 +51,14 @@ class AuthRequest(BaseModel):
     email: str
     password: str
 
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
 class UserProfile(BaseModel):
     first_name: str; last_name: str; email: str; phone: str; password: str; age: int; gender: str; height_cm: float; weight_kg: float; activity_level: str; deficit_tier: str; diet_preference: str; alcohol_consumption: str
 
 class MealLog(BaseModel):
-    user_id: int; dish_name: str; calories: int; protein: int; carbs: int; fat: int; portion: float
+    dish_name: str; calories: int; protein: int; carbs: int; fat: int; portion: float
 
 def calculate_macros(profile: UserProfile):
     bmr = (10 * profile.weight_kg) + (6.25 * profile.height_cm) - (5 * profile.age) + (5 if profile.gender.lower() == "male" else -161)
@@ -63,10 +85,21 @@ def calculate_macros(profile: UserProfile):
 # 3. API ENDPOINTS (SECURED)
 # ==========================================
 
+@app.post("/forgot_password")
+def forgot_password(req: ForgotPasswordRequest):
+    try:
+        supabase.auth.reset_password_for_email(req.email.strip())
+    except Exception:
+        pass # Prevent user enumeration
+    return {"status": "success", "message": "If this email is registered, a reset link has been sent."}
+
 @app.post("/auth")
 def authenticate(req: AuthRequest):
     try:
-        supabase.auth.sign_in_with_password({"email": req.email.strip(), "password": req.password})
+        auth_res = supabase.auth.sign_in_with_password({"email": req.email.strip(), "password": req.password})
+        access_token = auth_res.session.access_token if auth_res.session else None
+        refresh_token = auth_res.session.refresh_token if auth_res.session else None
+
         res = supabase.table("users").select("*").eq("email", req.email.strip()).execute()
         if res.data:
             user = res.data[0]
@@ -83,14 +116,38 @@ def authenticate(req: AuthRequest):
                 "target_fat": user["target_fat"], "diet_preference": user["diet_preference"],
                 "target_water_ml": base_water, "target_steps": step_goals.get(activity, 10000)
             }
-            return {"status": "success", "user_id": user["id"], "goals": macros}
+            return {
+                "status": "success", 
+                "user_id": user["id"], 
+                "goals": macros,
+                "access_token": access_token,
+                "refresh_token": refresh_token
+            }
     except Exception as e:
         raise HTTPException(status_code=401, detail="Invalid Email or Password.")
+
+@app.get("/me")
+def get_me(current_user: dict = Depends(get_current_user)):
+    user = current_user
+    weight = user.get("weight_kg", 70)
+    activity = user.get("activity_level", "sedentary")
+    base_water = int(weight * 35)
+    if activity == 'moderate': base_water += 500
+    elif activity == 'active': base_water += 1000
+    step_goals = {"sedentary": 5000, "light": 7500, "moderate": 10000, "active": 12000}
+
+    macros = {
+        "tdee": user["tdee"], "target_calories": user["target_calories"],
+        "target_protein": user["target_protein"], "target_carbs": user["target_carbs"],
+        "target_fat": user["target_fat"], "diet_preference": user["diet_preference"],
+        "target_water_ml": base_water, "target_steps": step_goals.get(activity, 10000)
+    }
+    return {"status": "success", "user_id": user["id"], "goals": macros}
 
 @app.post("/profile")
 def create_profile(profile: UserProfile):
     try:
-        supabase.auth.sign_up({"email": profile.email.strip(), "password": profile.password})
+        auth_res = supabase.auth.sign_up({"email": profile.email.strip(), "password": profile.password})
     except Exception as e:
         raise HTTPException(status_code=400, detail="Email already registered or invalid.")
 
@@ -109,10 +166,26 @@ def create_profile(profile: UserProfile):
     res = supabase.table("users").insert(user_data).execute()
     new_user_id = res.data[0]['id']
     
-    return {"message": "Cloud Profile created", "user_id": new_user_id, "calculated_goals": macros}
+    access_token = auth_res.session.access_token if auth_res.session else None
+    refresh_token = auth_res.session.refresh_token if auth_res.session else None
+    
+    return {
+        "message": "Cloud Profile created", 
+        "user_id": new_user_id, 
+        "calculated_goals": macros,
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "needs_verification": access_token is None
+    }
 
 @app.post("/analyze")
-async def analyze_food(file: Optional[UploadFile] = File(None), manual_dish: Optional[str] = Form(None), diet_preference: str = Form("Any"), alcohol: str = Form("None")):
+async def analyze_food(
+    file: Optional[UploadFile] = File(None), 
+    manual_dish: Optional[str] = Form(None), 
+    diet_preference: str = Form("Any"), 
+    alcohol: str = Form("None"),
+    current_user: dict = Depends(get_current_user)
+):
     try:
         # ADVANCED ALCOHOL LOGIC
         diet_rules = f"\nCRITICAL: User diet is '{diet_preference}'. If the image or text is an alcoholic beverage (bottle, can, poured drink), you MUST set 'health_badge' to 'Alcohol'. You MUST identify the specific type (e.g., 'Scotch Whisky', 'Wheat Beer'). You MUST calculate calories and macros for exactly ONE STANDARD SERVING (e.g., 1 Peg/30ml for spirits, 1 Pint/330ml for beer). Set the dish_name to '[Brand/Type] (1 Peg/Beer)' so the user can multiply it."
@@ -138,19 +211,18 @@ async def analyze_food(file: Optional[UploadFile] = File(None), manual_dish: Opt
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/log_meal")
-def log_meal(meal: MealLog):
+def log_meal(meal: MealLog, current_user: dict = Depends(get_current_user)):
     meal_data = {
-        "user_id": meal.user_id, "dish_name": meal.dish_name, "calories": meal.calories, 
+        "user_id": current_user["id"], "dish_name": meal.dish_name, "calories": meal.calories, 
         "protein": meal.protein, "carbs": meal.carbs, "fat": meal.fat, "portion": meal.portion
     }
     supabase.table("meals").insert(meal_data).execute()
     return {"status": "success"}
 
 @app.get("/close_day")
-def close_day(user_id: int):
-    user_res = supabase.table("users").select("*").eq("id", user_id).execute()
-    if not user_res.data: raise HTTPException(status_code=400, detail="No user found.")
-    user = user_res.data[0]
+def close_day(current_user: dict = Depends(get_current_user)):
+    user = current_user
+    user_id = user["id"]
     
     meals_res = supabase.table("meals").select("*").eq("user_id", user_id).gte("created_at", "today").execute()
     meals = meals_res.data
@@ -179,10 +251,9 @@ def close_day(user_id: int):
     return {"report": response.text, "file_path": filepath}
 
 @app.get("/history")
-def get_history(user_id: int):
-    user_res = supabase.table("users").select("target_calories").eq("id", user_id).execute()
-    if not user_res.data: raise HTTPException(status_code=400, detail="User not found")
-    target = user_res.data[0]['target_calories']
+def get_history(current_user: dict = Depends(get_current_user)):
+    user_id = current_user["id"]
+    target = current_user['target_calories']
     
     meals_res = supabase.table("meals").select("created_at, calories").eq("user_id", user_id).execute()
     daily_totals = {}
