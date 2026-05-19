@@ -113,7 +113,7 @@ def get_me(user: dict = Depends(get_current_user)):
     }
     return {"status": "success", "user_id": user["id"], "goals": macros}
 
-@@app.post("/profile")
+@app.post("/profile")
 def create_profile(profile: UserProfile):
     try: 
         auth_res = supabase.auth.sign_up({"email": profile.email.strip(), "password": profile.password})
