@@ -6,14 +6,13 @@ import google.generativeai as genai
 from PIL import Image
 import io
 import json
-import csv
 import os
 import requests
 from typing import Optional
 from supabase import create_client, Client
 
 # ==========================================
-# 1. SETUP & CLOUD CONFIGURATION (SECURED)
+# 1. SETUP & SECURE CONFIGURATION
 # ==========================================
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
 SUPA_URL = os.environ.get("SUPABASE_URL")
@@ -23,7 +22,7 @@ genai.configure(api_key=GEMINI_KEY)
 supabase: Client = create_client(SUPA_URL, SUPA_KEY)
 model = genai.GenerativeModel('gemini-2.5-flash')
 
-app = FastAPI(title="Calorie Counter - Secure Cloud Backend")
+app = FastAPI(title="Calorie Counter - Mobile API")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 security = HTTPBearer()
@@ -32,280 +31,161 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
     token = credentials.credentials
     try:
         user_res = supabase.auth.get_user(token)
-        if not user_res or not user_res.user:
-            raise HTTPException(status_code=401, detail="Invalid token")
-            
-        email = user_res.user.email
-        res = supabase.table("users").select("*").eq("email", email).execute()
-        if not res.data:
-            raise HTTPException(status_code=404, detail="User profile not found")
-            
+        if not user_res or not user_res.user: raise HTTPException(status_code=401, detail="Invalid token")
+        res = supabase.table("users").select("*").eq("email", user_res.user.email).execute()
+        if not res.data: raise HTTPException(status_code=404, detail="User profile not found")
         return res.data[0]
     except Exception as e:
-        raise HTTPException(status_code=401, detail=f"Authentication failed: {str(e)}")
+        raise HTTPException(status_code=401, detail=f"Auth failed: {str(e)}")
 
 # ==========================================
 # 2. DATA MODELS & DYNAMIC MATH
 # ==========================================
-class AuthRequest(BaseModel):
-    email: str
-    password: str
-
-class ForgotPasswordRequest(BaseModel):
-    email: str
-
+class AuthRequest(BaseModel): email: str; password: str
+class ForgotPasswordRequest(BaseModel): email: str
 class UserProfile(BaseModel):
-    first_name: str; last_name: str; email: str; phone: str; password: str; age: int; gender: str; height_cm: float; weight_kg: float; activity_level: str; deficit_tier: str; diet_preference: str; alcohol_consumption: str
-
-class MealLog(BaseModel):
-    dish_name: str; calories: int; protein: int; carbs: int; fat: int; portion: float
-
-class NotificationRegistration(BaseModel):
-    notification_endpoint: str
+    first_name: str; last_name: str; email: str; phone: str; password: str; age: int; gender: str
+    height_cm: float; weight_kg: float; activity_level: str
+    primary_goal: str; pace: str; diet_preference: str; alcohol_consumption: str
+class MealLog(BaseModel): dish_name: str; calories: int; protein: int; carbs: int; fat: int; portion: float
+class NotificationRegistration(BaseModel): notification_endpoint: str
 
 def calculate_macros(profile: UserProfile):
     bmr = (10 * profile.weight_kg) + (6.25 * profile.height_cm) - (5 * profile.age) + (5 if profile.gender.lower() == "male" else -161)
     multipliers = {"sedentary": 1.2, "light": 1.375, "moderate": 1.55, "active": 1.725}
     tdee = bmr * multipliers.get(profile.activity_level.lower(), 1.2)
-    deficits = {"low": 250, "medium": 500, "high": 750, "aggressive": 1000}
-    target_calories = max(tdee - deficits.get(profile.deficit_tier.lower(), 500), 1500 if profile.gender.lower() == "male" else 1200)
+    
+    # NEW GOAL LOGIC
+    paces = {"slow": 250, "medium": 500, "fast": 750}
+    adjustment = paces.get(profile.pace.lower(), 500)
+    
+    goal = profile.primary_goal.lower()
+    if "lose" in goal: target_calories = max(tdee - adjustment, 1500 if profile.gender.lower() == "male" else 1200)
+    elif "gain" in goal: target_calories = tdee + adjustment
+    else: target_calories = tdee # Maintain
 
     base_water = int(profile.weight_kg * 35) 
     if profile.activity_level.lower() == 'moderate': base_water += 500
     elif profile.activity_level.lower() == 'active': base_water += 1000
-    
     step_goals = {"sedentary": 5000, "light": 7500, "moderate": 10000, "active": 12000}
-    target_steps = step_goals.get(profile.activity_level.lower(), 10000)
 
     return {
         "tdee": int(tdee), "target_calories": int(target_calories), "target_protein": int(profile.weight_kg * 2.0),
         "target_carbs": int((target_calories - ((profile.weight_kg * 2.0 * 4.0) + (target_calories * 0.25))) / 4.0),
         "target_fat": int((target_calories * 0.25) / 9.0), "diet_preference": profile.diet_preference,
-        "target_water_ml": base_water, "target_steps": target_steps 
+        "target_water_ml": base_water, "target_steps": step_goals.get(profile.activity_level.lower(), 10000) 
     }
 
 # ==========================================
-# 3. API ENDPOINTS (SECURED)
+# 3. SECURED API ENDPOINTS 
 # ==========================================
-
 @app.post("/forgot_password")
 def forgot_password(req: ForgotPasswordRequest):
-    try:
-        supabase.auth.reset_password_for_email(req.email.strip())
-    except Exception:
-        pass # Prevent user enumeration
-    return {"status": "success", "message": "If this email is registered, a reset link has been sent."}
+    try: supabase.auth.reset_password_for_email(req.email.strip())
+    except Exception: pass 
+    return {"status": "success"}
 
 @app.post("/auth")
 def authenticate(req: AuthRequest):
     try:
         auth_res = supabase.auth.sign_in_with_password({"email": req.email.strip(), "password": req.password})
-        access_token = auth_res.session.access_token if auth_res.session else None
-        refresh_token = auth_res.session.refresh_token if auth_res.session else None
-
         res = supabase.table("users").select("*").eq("email", req.email.strip()).execute()
         if res.data:
             user = res.data[0]
-            weight = user.get("weight_kg", 70)
             activity = user.get("activity_level", "sedentary")
-            base_water = int(weight * 35)
-            if activity == 'moderate': base_water += 500
-            elif activity == 'active': base_water += 1000
-            step_goals = {"sedentary": 5000, "light": 7500, "moderate": 10000, "active": 12000}
-
+            base_water = int(user.get("weight_kg", 70) * 35) + (500 if activity == 'moderate' else 1000 if activity == 'active' else 0)
             macros = {
-                "tdee": user["tdee"], "target_calories": user["target_calories"],
-                "target_protein": user["target_protein"], "target_carbs": user["target_carbs"],
-                "target_fat": user["target_fat"], "diet_preference": user["diet_preference"],
-                "target_water_ml": base_water, "target_steps": step_goals.get(activity, 10000)
+                "tdee": user["tdee"], "target_calories": user["target_calories"], "target_protein": user["target_protein"],
+                "target_carbs": user["target_carbs"], "target_fat": user["target_fat"], "diet_preference": user["diet_preference"],
+                "target_water_ml": base_water, "target_steps": {"sedentary": 5000, "light": 7500, "moderate": 10000, "active": 12000}.get(activity, 10000)
             }
-            return {
-                "status": "success", 
-                "user_id": user["id"], 
-                "goals": macros,
-                "access_token": access_token,
-                "refresh_token": refresh_token
-            }
-    except Exception as e:
-        raise HTTPException(status_code=401, detail="Invalid Email or Password.")
+            return {"status": "success", "user_id": user["id"], "goals": macros, "access_token": auth_res.session.access_token, "refresh_token": auth_res.session.refresh_token}
+    except Exception: raise HTTPException(status_code=401, detail="Invalid Email/Password.")
 
 @app.get("/me")
-def get_me(current_user: dict = Depends(get_current_user)):
-    user = current_user
-    weight = user.get("weight_kg", 70)
+def get_me(user: dict = Depends(get_current_user)):
     activity = user.get("activity_level", "sedentary")
-    base_water = int(weight * 35)
-    if activity == 'moderate': base_water += 500
-    elif activity == 'active': base_water += 1000
-    step_goals = {"sedentary": 5000, "light": 7500, "moderate": 10000, "active": 12000}
-
+    base_water = int(user.get("weight_kg", 70) * 35) + (500 if activity == 'moderate' else 1000 if activity == 'active' else 0)
     macros = {
-        "tdee": user["tdee"], "target_calories": user["target_calories"],
-        "target_protein": user["target_protein"], "target_carbs": user["target_carbs"],
-        "target_fat": user["target_fat"], "diet_preference": user["diet_preference"],
-        "target_water_ml": base_water, "target_steps": step_goals.get(activity, 10000)
+        "tdee": user["tdee"], "target_calories": user["target_calories"], "target_protein": user["target_protein"],
+        "target_carbs": user["target_carbs"], "target_fat": user["target_fat"], "diet_preference": user["diet_preference"],
+        "target_water_ml": base_water, "target_steps": {"sedentary": 5000, "light": 7500, "moderate": 10000, "active": 12000}.get(activity, 10000)
     }
     return {"status": "success", "user_id": user["id"], "goals": macros}
 
 @app.post("/profile")
 def create_profile(profile: UserProfile):
-    try:
-        auth_res = supabase.auth.sign_up({"email": profile.email.strip(), "password": profile.password})
-    except Exception as e:
-        raise HTTPException(status_code=400, detail="Email already registered or invalid.")
+    try: auth_res = supabase.auth.sign_up({"email": profile.email.strip(), "password": profile.password})
+    except Exception: raise HTTPException(status_code=400, detail="Email already registered/invalid.")
 
     macros = calculate_macros(profile)
-    
     user_data = {
-        "first_name": profile.first_name.strip(), "last_name": profile.last_name.strip(), 
-        "email": profile.email.strip(), "phone": profile.phone.strip(),
-        "age": profile.age, "gender": profile.gender, 
-        "height_cm": profile.height_cm, "weight_kg": profile.weight_kg, 
-        "activity_level": profile.activity_level, "deficit_tier": profile.deficit_tier, 
+        "first_name": profile.first_name.strip(), "last_name": profile.last_name.strip(), "email": profile.email.strip(), "phone": profile.phone.strip(),
+        "age": profile.age, "gender": profile.gender, "height_cm": profile.height_cm, "weight_kg": profile.weight_kg, 
+        "activity_level": profile.activity_level, "primary_goal": profile.primary_goal, "pace": profile.pace, 
         "diet_preference": profile.diet_preference, "alcohol_consumption": profile.alcohol_consumption,
-        "tdee": macros['tdee'], "target_calories": macros['target_calories'], 
-        "target_protein": macros['target_protein'], "target_carbs": macros['target_carbs'], "target_fat": macros['target_fat']
+        "tdee": macros['tdee'], "target_calories": macros['target_calories'], "target_protein": macros['target_protein'], "target_carbs": macros['target_carbs'], "target_fat": macros['target_fat']
     }
     res = supabase.table("users").insert(user_data).execute()
-    new_user_id = res.data[0]['id']
-    
-    access_token = auth_res.session.access_token if auth_res.session else None
-    refresh_token = auth_res.session.refresh_token if auth_res.session else None
-    
-    return {
-        "message": "Cloud Profile created", 
-        "user_id": new_user_id, 
-        "calculated_goals": macros,
-        "access_token": access_token,
-        "refresh_token": refresh_token,
-        "needs_verification": access_token is None
-    }
+    return {"message": "Profile created", "user_id": res.data[0]['id'], "calculated_goals": macros, "access_token": auth_res.session.access_token if auth_res.session else None}
 
 @app.post("/analyze")
-async def analyze_food(
-    file: Optional[UploadFile] = File(None), 
-    manual_dish: Optional[str] = Form(None), 
-    diet_preference: str = Form("Any"), 
-    alcohol: str = Form("None"),
-    current_user: dict = Depends(get_current_user)
-):
+async def analyze_food(file: Optional[UploadFile] = File(None), manual_dish: Optional[str] = Form(None), diet_preference: str = Form("Any"), current_user: dict = Depends(get_current_user)):
     try:
-        diet_rules = f"\nCRITICAL: User diet is '{diet_preference}'. If the image or text is an alcoholic beverage (bottle, can, poured drink), you MUST set 'health_badge' to 'Alcohol'. You MUST identify the specific type (e.g., 'Scotch Whisky', 'Wheat Beer'). You MUST calculate calories and macros for exactly ONE STANDARD SERVING (e.g., 1 Peg/30ml for spirits, 1 Pint/330ml for beer). Set the dish_name to '[Brand/Type] (1 Peg/Beer)' so the user can multiply it."
-        
-        base_prompt = f"Return a JSON array of up to 4 most likely dish/drink options. Each object must contain exactly these keys: dish_name (string), health_score (integer), health_badge (string), estimated_calories (integer), protein_grams (integer), carbs_grams (integer), fat_grams (integer), healthier_swap_name (string). {diet_rules}"
-
+        diet_rules = f"\nCRITICAL: User diet is '{diet_preference}'. Flag alcohol with 'health_badge': 'Alcohol' and calculate exactly 1 Standard Serving."
+        base_prompt = f"Return a JSON array of up to 4 most likely dish/drink options. Keys: dish_name, health_score, health_badge, estimated_calories, protein_grams, carbs_grams, fat_grams, healthier_swap_name. {diet_rules}"
         strict_config = genai.GenerationConfig(response_mime_type="application/json")
 
-        if not file and manual_dish: 
-            response = model.generate_content(f"User ate/drank: '{manual_dish}'. {base_prompt}", generation_config=strict_config)
-        elif file and manual_dish: 
-            response = model.generate_content([f"User says this is '{manual_dish}'. Use image for portion. {base_prompt}", Image.open(io.BytesIO(await file.read()))], generation_config=strict_config)
-        elif file and not manual_dish: 
-            response = model.generate_content([f"Identify this food or drink. {base_prompt}", Image.open(io.BytesIO(await file.read()))], generation_config=strict_config)
-        else: 
-            raise HTTPException(status_code=400, detail="Must provide image or text.")
-        
-        try:
-            return json.loads(response.text)
-        except Exception as parse_error:
-            raise HTTPException(status_code=500, detail=f"AI Format Error: {parse_error}. Raw: {response.text}")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        if not file and manual_dish: response = model.generate_content(f"User ate: '{manual_dish}'. {base_prompt}", generation_config=strict_config)
+        elif file and manual_dish: response = model.generate_content([f"User says '{manual_dish}'. {base_prompt}", Image.open(io.BytesIO(await file.read()))], generation_config=strict_config)
+        elif file: response = model.generate_content([f"Identify this. {base_prompt}", Image.open(io.BytesIO(await file.read()))], generation_config=strict_config)
+        else: raise HTTPException(status_code=400, detail="Provide image or text.")
+        return json.loads(response.text)
+    except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/log_meal")
 def log_meal(meal: MealLog, current_user: dict = Depends(get_current_user)):
-    meal_data = {
-        "user_id": current_user["id"], "dish_name": meal.dish_name, "calories": meal.calories, 
-        "protein": meal.protein, "carbs": meal.carbs, "fat": meal.fat, "portion": meal.portion
-    }
-    supabase.table("meals").insert(meal_data).execute()
+    supabase.table("meals").insert({"user_id": current_user["id"], "dish_name": meal.dish_name, "calories": meal.calories, "protein": meal.protein, "carbs": meal.carbs, "fat": meal.fat, "portion": meal.portion}).execute()
     return {"status": "success"}
 
 @app.get("/close_day")
 def close_day(current_user: dict = Depends(get_current_user)):
-    user = current_user
-    user_id = user["id"]
+    meals_res = supabase.table("meals").select("*").eq("user_id", current_user["id"]).gte("created_at", "today").execute()
+    if not meals_res.data: raise HTTPException(status_code=400, detail="No meals logged today!")
     
-    meals_res = supabase.table("meals").select("*").eq("user_id", user_id).gte("created_at", "today").execute()
-    meals = meals_res.data
-    if not meals: raise HTTPException(status_code=400, detail="No meals logged today!")
-
-    filepath = os.path.join(os.getcwd(), f"dietitian_report_{user['first_name']}.csv")
-    with open(filepath, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerow(["Daily Dietitian Report", f"Client: {user['first_name']} {user['last_name']}", f"Diet: {user['diet_preference']}"])
-        writer.writerow(["Target Calories:", user['target_calories'], "TDEE (Maintenance):", user['tdee']])
-        writer.writerow([])
-        writer.writerow(["Dish Name", "Portions", "Calories", "Protein (g)", "Carbs (g)", "Fat (g)", "Time Logged"])
-        
-        tot_cal = tot_pro = tot_carb = tot_fat = 0
-        for m in meals:
-            time_logged = m['created_at'].split("T")[1][:5] if 'T' in m['created_at'] else "N/A"
-            writer.writerow([m['dish_name'], m['portion'], m['calories'], m['protein'], m['carbs'], m['fat'], time_logged])
-            tot_cal += m['calories']; tot_pro += m['protein']; tot_carb += m['carbs']; tot_fat += m['fat']
-            
-        writer.writerow([])
-        writer.writerow(["TOTAL CONSUMED", "-", tot_cal, tot_pro, tot_carb, tot_fat, "-"])
-        writer.writerow(["TARGET MACROS", "-", user['target_calories'], user['target_protein'], user['target_carbs'], user['target_fat'], "-"])
-
-    prompt = f"You are an expert fitness coach. User just closed day. TDEE is {user['tdee']} kcal. Goal is {user['target_calories']} kcal. Actual today: {tot_cal} kcal. Provide: 1. Encouraging Summary. 2. Clinical Breakdown. 3. Action Plan."
+    tot_cal = sum(m['calories'] for m in meals_res.data)
+    prompt = f"User closed day. Goal: {current_user['target_calories']} kcal. Actual: {tot_cal} kcal. Provide a VERY concise, punchy, encouraging 3-sentence summary of their day. No lists, no fluff. Just straight to the point."
     response = model.generate_content(prompt)
-    return {"report": response.text, "file_path": filepath}
+    
+    # We now return the RAW data to the mobile app, so it can build the CSV natively!
+    return {"report": response.text, "raw_meals": meals_res.data}
 
 @app.get("/history")
-def get_history(current_user: dict = Depends(get_current_user)):
-    user_id = current_user["id"]
-    target = current_user['target_calories']
+def get_history(days: int = 7, current_user: dict = Depends(get_current_user)):
+    meals_res = supabase.table("meals").select("*").eq("user_id", current_user["id"]).order("created_at", desc=False).execute()
     
-    meals_res = supabase.table("meals").select("created_at, calories").eq("user_id", user_id).execute()
+    # Send both daily totals (for charts) and the raw meal history (for the Export feature)
     daily_totals = {}
     for meal in meals_res.data:
         date_only = meal['created_at'].split('T')[0]
-        if date_only not in daily_totals: daily_totals[date_only] = 0
-        daily_totals[date_only] += meal['calories']
+        daily_totals[date_only] = daily_totals.get(date_only, 0) + meal['calories']
         
-    sorted_dates = sorted(daily_totals.keys())[-7:]
-    chart_data = [{"date": d[5:], "calories": daily_totals[d], "target": target} for d in sorted_dates]
-    return {"chart_data": chart_data}
+    sorted_dates = sorted(daily_totals.keys())[-days:]
+    chart_data = [{"date": d[5:], "calories": daily_totals[d], "target": current_user['target_calories']} for d in sorted_dates]
+    
+    return {"chart_data": chart_data, "raw_history": meals_res.data}
 
 @app.post("/register_notifications")
 def register_notifications(payload: NotificationRegistration, current_user: dict = Depends(get_current_user)):
-    try:
-        # We will add the notification_endpoint column to Supabase later if it doesn't exist,
-        # but the backend route is now ready to receive the token!
-        # supabase.table("users").update({"notification_endpoint": payload.notification_endpoint}).eq("id", current_user['id']).execute()
-        return {"status": "success", "message": "Endpoint received securely."}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    supabase.table("users").update({"notification_endpoint": payload.notification_endpoint}).eq("id", current_user['id']).execute()
+    return {"status": "success"}
 
 @app.get("/scan_barcode/{barcode}")
 def scan_barcode(barcode: str):
     try:
-        url = f"https://world.openfoodfacts.org/api/v2/product/{barcode}.json"
-        response = requests.get(url, headers={"User-Agent": "CalorieCounter/1.0"})
-        data = response.json()
-
+        data = requests.get(f"https://world.openfoodfacts.org/api/v2/product/{barcode}.json", headers={"User-Agent": "CalorieCounter/1.0"}).json()
         if data.get("status") == 1:
-            product = data.get("product", {})
-            nutriments = product.get("nutriments", {})
-
-            name = product.get("product_name", "Unknown Packaged Item")
-            cals = nutriments.get("energy-kcal_100g", 0)
-            pro = nutriments.get("proteins_100g", 0)
-            carb = nutriments.get("carbohydrates_100g", 0)
-            fat = nutriments.get("fat_100g", 0)
-
-            return [{
-                "dish_name": f"{name} (per 100g)",
-                "health_score": 100, 
-                "health_badge": "Verified Barcode",
-                "estimated_calories": int(cals),
-                "protein_grams": int(pro),
-                "carbs_grams": int(carb),
-                "fat_grams": int(fat),
-                "healthier_swap_name": "N/A"
-            }]
-        else:
-            raise HTTPException(status_code=404, detail="Barcode not found.")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+            n = data.get("product", {}).get("nutriments", {})
+            return [{"dish_name": data["product"].get("product_name", "Unknown"), "health_score": 100, "health_badge": "Verified Barcode", "estimated_calories": int(n.get("energy-kcal_100g", 0)), "protein_grams": int(n.get("proteins_100g", 0)), "carbs_grams": int(n.get("carbohydrates_100g", 0)), "fat_grams": int(n.get("fat_100g", 0)), "healthier_swap_name": "N/A"}]
+        raise HTTPException(status_code=404, detail="Barcode not found.")
+    except Exception as e: raise HTTPException(status_code=500, detail=str(e))
