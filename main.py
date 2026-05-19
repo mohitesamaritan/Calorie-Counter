@@ -113,10 +113,14 @@ def get_me(user: dict = Depends(get_current_user)):
     }
     return {"status": "success", "user_id": user["id"], "goals": macros}
 
-@app.post("/profile")
+@@app.post("/profile")
 def create_profile(profile: UserProfile):
-    try: auth_res = supabase.auth.sign_up({"email": profile.email.strip(), "password": profile.password})
-    except Exception: raise HTTPException(status_code=400, detail="Email already registered/invalid.")
+    try: 
+        auth_res = supabase.auth.sign_up({"email": profile.email.strip(), "password": profile.password})
+    except Exception as e: 
+        # THIS IS THE NEW LINE: It will print the exact Supabase error to your Render logs!
+        print(f"🔥 SUPABASE REJECTED REGISTRATION: {str(e)} 🔥")
+        raise HTTPException(status_code=400, detail="Email already registered/invalid.")
 
     macros = calculate_macros(profile)
     user_data = {
@@ -128,7 +132,6 @@ def create_profile(profile: UserProfile):
     }
     res = supabase.table("users").insert(user_data).execute()
     return {"message": "Profile created", "user_id": res.data[0]['id'], "calculated_goals": macros, "access_token": auth_res.session.access_token if auth_res.session else None}
-
 @app.post("/analyze")
 async def analyze_food(file: Optional[UploadFile] = File(None), manual_dish: Optional[str] = Form(None), diet_preference: str = Form("Any"), current_user: dict = Depends(get_current_user)):
     try:
