@@ -14,12 +14,22 @@ from supabase import create_client, Client
 # ==========================================
 # 1. SETUP & SECURE CONFIGURATION
 # ==========================================
+import os
+from httpx import Timeout
+from supabase import create_client, Client, ClientConfiguration
+
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
 SUPA_URL = os.environ.get("SUPABASE_URL")
 SUPA_KEY = os.environ.get("SUPABASE_KEY")
 
 genai.configure(api_key=GEMINI_KEY) 
-supabase: Client = create_client(SUPA_URL, SUPA_KEY)
+
+# ✅ Added explicit 30-second network timeout options to prevent read timeouts
+supabase_config = ClientConfiguration(
+    timeout=Timeout(30.0, read=30.0, write=30.0, connect=10.0)
+)
+supabase: Client = create_client(SUPA_URL, SUPA_KEY, options=supabase_config)
+
 model = genai.GenerativeModel('gemini-2.5-flash')
 
 app = FastAPI(title="Calorie Counter - Mobile API")
