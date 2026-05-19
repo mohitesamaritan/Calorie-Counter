@@ -15,8 +15,8 @@ from supabase import create_client, Client
 # 1. SETUP & SECURE CONFIGURATION
 # ==========================================
 import os
-import httpx
 from supabase import create_client, Client
+from supabase.client import ClientOptions  # ✅ The correct class import
 
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
 SUPA_URL = os.environ.get("SUPABASE_URL")
@@ -24,11 +24,12 @@ SUPA_KEY = os.environ.get("SUPABASE_KEY")
 
 genai.configure(api_key=GEMINI_KEY) 
 
-# ✅ Pass httpx options directly using client_options dict
-# This fixes the ImportError and sets a 30-second timeout cushion
-custom_options = {
-    "postgrest_client_timeout": httpx.Timeout(30.0, read=30.0, write=30.0, connect=10.0)
-}
+# ✅ Pass the timeout settings using the dedicated ClientOptions object
+custom_options = ClientOptions(
+    postgrest_client_timeout=30,
+    storage_client_timeout=30,
+    schema="public"
+)
 
 supabase: Client = create_client(SUPA_URL, SUPA_KEY, options=custom_options)
 
